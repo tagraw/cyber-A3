@@ -41,6 +41,8 @@ import argparse
 import time
 import socket,os,struct, time
 import numpy as np
+import cv2
+
 
 # Args for setting IP/port of AI-deck. Default settings are for when
 # AI-deck is in AP mode.
@@ -101,22 +103,42 @@ while(1):
           #print("Chunk size is {} ({:02X}->{:02X})".format(length, src, dst))
           chunk = rx_bytes(length - 2)
           imgStream.extend(chunk)
-     
+
       count = count + 1
       meanTimePerImage = (time.time()-start) / count
       print("{}".format(meanTimePerImage))
       print("{}".format(1/meanTimePerImage))
 
       if format == 0:
-          bayer_img = np.frombuffer(imgStream, dtype=np.uint8)   
-          bayer_img.shape = (244, 324)
-          color_img = cv2.cvtColor(bayer_img, cv2.COLOR_BayerBG2BGRA)
-          cv2.imshow('Raw', bayer_img)
-          cv2.imshow('Color', color_img)
-          if args.save:
-              cv2.imwrite(f"stream_out/raw/img_{count:06d}.png", bayer_img)
-              cv2.imwrite(f"stream_out/debayer/img_{count:06d}.png", color_img)
-          cv2.waitKey(1)
+        bayer_img = np.frombuffer(imgStream, dtype=np.uint8)
+        bayer_img.shape = (244, 324)
+
+        # Convert Bayer to color image
+        color_img = cv2.cvtColor(bayer_img, cv2.COLOR_BayerBG2BGR)
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
+
+        # Apply Gaussian blur (reduces noise)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Edge detection using Canny
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Optional: overlay edges on original image
+        edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        overlay = cv2.addWeighted(color_img, 0.8, edges_colored, 0.5, 0)
+
+        cv2.imshow('Original', color_img)
+        cv2.imshow('Gray', gray)
+        cv2.imshow('Edges', edges)
+        cv2.imshow('Overlay', overlay)
+
+        if args.save:
+            cv2.imwrite(f"stream_out/original/img_{count:06d}.png", color_img)
+            cv2.imwrite(f"stream_out/edges/img_{count:06d}.png", edges)
+
+        cv2.waitKey(1)
       else:
           with open("img.jpeg", "wb") as f:
               f.write(imgStream)
