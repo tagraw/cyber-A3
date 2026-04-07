@@ -153,7 +153,7 @@ with SyncCrazyflie(args.uri, cf=Crazyflie(rw_cache='./cache')) as scf:
                 position = determine_position(cx, cy, frame_w, frame_h, w * h)
                 draw_results(frame, cx, cy, x, y, w, h, position)
                 print(position)
-                move_drone(mc, position)
+                #move_drone(mc, position)
             else:
                 mc.stop()
                 cv2.putText(frame, "No ball detected", (10, 30),
