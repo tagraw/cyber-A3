@@ -15,17 +15,28 @@ parser.add_argument("-p", type=int, default=5000, metavar="port")
 parser.add_argument("--uri", default="radio://0/80/2M/E7E7E7E7E7", metavar="uri")
 args = parser.parse_args()
 
+# --- Color thresholds ---
 RED_LOWER1 = np.array([0,   120, 70])
 RED_UPPER1 = np.array([10,  255, 255])
 RED_LOWER2 = np.array([160, 120, 70])
 RED_UPPER2 = np.array([180, 255, 255])
 
+# --- Parameters ---
 MIN_BALL_AREA = 300
 POSITION_THRESHOLD = 20
 REFERENCE_AREA = 3000
 VELOCITY = 0.15
 TAKEOFF_HEIGHT = 0.5
 
+# --- NEW: Command throttling ---
+CMD_INTERVAL = 0.1  # seconds (10 Hz)
+last_cmd_time = 0
+last_position = None
+
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
 
 def detect_red_ball(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -33,8 +44,9 @@ def detect_red_ball(frame):
         cv2.inRange(hsv, RED_LOWER1, RED_UPPER1),
         cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
     )
+
     kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -48,6 +60,10 @@ def detect_red_ball(frame):
     x, y, w, h = cv2.boundingRect(largest)
     return (x + w // 2, y + h // 2, x, y, w, h), mask
 
+
+# ---------------------------------------------------------------------------
+# Position logic
+# ---------------------------------------------------------------------------
 
 def determine_position(cx, cy, frame_w, frame_h, ball_area):
     dx = cx - frame_w // 2
@@ -64,13 +80,16 @@ def determine_position(cx, cy, frame_w, frame_h, ball_area):
 
     if abs_dx < POSITION_THRESHOLD and abs_dy < POSITION_THRESHOLD:
         return depth_dir if depth_dir else "Centered"
-    if abs_dx >= abs_dy and abs_dx > POSITION_THRESHOLD:
+
+    if abs_dx >= abs_dy:
         return "Right" if dx > 0 else "Left"
-    if abs_dy > abs_dx and abs_dy > POSITION_THRESHOLD:
+    else:
         return "Down" if dy > 0 else "Up"
 
-    return depth_dir if depth_dir else "Centered"
 
+# ---------------------------------------------------------------------------
+# Drone control
+# ---------------------------------------------------------------------------
 
 def move_drone(mc, position):
     if position == "Left":
@@ -89,15 +108,27 @@ def move_drone(mc, position):
         mc.stop()
 
 
+# ---------------------------------------------------------------------------
+# Drawing
+# ---------------------------------------------------------------------------
+
 def draw_results(frame, cx, cy, x, y, w, h, position):
     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
     size = 10
     cv2.line(frame, (cx - size, cy - size), (cx + size, cy + size), (0, 0, 255), 2)
     cv2.line(frame, (cx + size, cy - size), (cx - size, cy + size), (0, 0, 255), 2)
-    cv2.putText(frame, position, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    fh, fw = frame.shape[:2]
-    cv2.drawMarker(frame, (fw // 2, fh // 2), (255, 255, 0), cv2.MARKER_CROSS, 20, 1)
 
+    cv2.putText(frame, position, (x, y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+    fh, fw = frame.shape[:2]
+    cv2.drawMarker(frame, (fw // 2, fh // 2),
+                   (255, 255, 0), cv2.MARKER_CROSS, 20, 1)
+
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
 
 def rx_bytes(sock, size):
     data = bytearray()
@@ -109,8 +140,9 @@ def rx_bytes(sock, size):
 def get_frame(sock):
     packetInfoRaw = rx_bytes(sock, 4)
     [length, routing, function] = struct.unpack('<HBB', packetInfoRaw)
+
     imgHeader = rx_bytes(sock, length - 2)
-    [magic, width, height, depth, format, size] = struct.unpack('<BHHBBI', imgHeader)
+    [magic, width, height, depth, fmt, size] = struct.unpack('<BHHBBI', imgHeader)
 
     if magic != 0xBC:
         return None
@@ -121,7 +153,7 @@ def get_frame(sock):
         [length, dst, src] = struct.unpack('<HBB', packetInfoRaw)
         imgStream.extend(rx_bytes(sock, length - 2))
 
-    if format == 0:
+    if fmt == 0:
         bayer_img = np.frombuffer(imgStream, dtype=np.uint8).reshape((244, 324))
         return cv2.cvtColor(bayer_img, cv2.COLOR_BayerBG2BGR)
     else:
@@ -129,16 +161,23 @@ def get_frame(sock):
         return cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 print(f"Connecting to AI deck at {args.n}:{args.p}...")
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_socket.connect((args.n, args.p))
 print("Socket connected")
 
 cflib.crtp.init_drivers()
+
 with SyncCrazyflie(args.uri, cf=Crazyflie(rw_cache='./cache')) as scf:
     with MotionCommander(scf, default_height=TAKEOFF_HEIGHT) as mc:
         print("Crazyflie airborne. Tracking red ball. Press 'q' to land.")
         time.sleep(1)
+
+        global last_cmd_time, last_position
 
         while True:
             frame = get_frame(client_socket)
@@ -148,22 +187,39 @@ with SyncCrazyflie(args.uri, cf=Crazyflie(rw_cache='./cache')) as scf:
             frame_h, frame_w = frame.shape[:2]
             result, mask = detect_red_ball(frame)
 
+            current_time = time.time()
+
             if result is not None:
                 cx, cy, x, y, w, h = result
                 position = determine_position(cx, cy, frame_w, frame_h, w * h)
+
                 draw_results(frame, cx, cy, x, y, w, h, position)
                 print(position)
-                #move_drone(mc, position)
+
+                # --- Rate-limited movement ---
+                if (current_time - last_cmd_time > CMD_INTERVAL and
+                        position != last_position):
+                    move_drone(mc, position)
+                    last_cmd_time = current_time
+                    last_position = position
+
             else:
-                mc.stop()
                 cv2.putText(frame, "No ball detected", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+                # --- Rate-limited stop ---
+                if current_time - last_cmd_time > CMD_INTERVAL:
+                    mc.stop()
+                    last_cmd_time = current_time
+                    last_position = None
 
             cv2.imshow("Red Ball Tracking", frame)
             cv2.imshow("Red Mask", mask)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+            time.sleep(0.03)  # stabilize loop (~30 FPS)
 
 cv2.destroyAllWindows()
 client_socket.close()
