@@ -30,8 +30,6 @@ TAKEOFF_HEIGHT = 0.5
 
 # --- NEW: Command throttling ---
 CMD_INTERVAL = 0.1  # seconds (10 Hz)
-last_cmd_time = 0
-last_position = None
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +176,8 @@ with SyncCrazyflie(args.uri, cf=Crazyflie(rw_cache='./cache')) as scf:
         time.sleep(1)
 
         global last_cmd_time, last_position
+        last_cmd_time = 0
+        last_position = None
 
         while True:
             frame = get_frame(client_socket)
